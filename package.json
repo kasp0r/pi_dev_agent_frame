@@ -20,6 +20,7 @@
     "lib",
     "skills",
     "prompts",
+    "frame.jpeg",
     "README.md",
     "LICENSE"
   ],
@@ -32,6 +33,7 @@
     "typebox": "*"
   },
   "pi": {
+    "image": "frame.jpeg",
     "extensions": [
       "./extensions"
     ],
