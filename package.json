@@ -1,0 +1,57 @@
+{
+  "name": "pi-agent-frame",
+  "version": "0.1.0",
+  "description": "Frame a goal into a subagent roster, generated AGENT.md files, and a shared TODO.md for agentic execution.",
+  "type": "module",
+  "license": "MIT",
+  "author": "kasp0r (https://github.com/kasp0r)",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "subagents",
+    "agents",
+    "scaffolding",
+    "planning",
+    "orchestration"
+  ],
+  "files": [
+    "extensions",
+    "lib",
+    "skills",
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/scaffold-core.test.mjs test/extension-smoke.test.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "jiti": "^2.7.0",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  }
+}
