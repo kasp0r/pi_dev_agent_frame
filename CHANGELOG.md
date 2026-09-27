@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-27
+
 ### Added
 
 - `/frame` command: frames a goal into a minimal agent roster and task graph,
@@ -24,3 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/scaffold-agents` prompt template for scripted or non-interactive use.
 - `examples/items-api/`: committed sample scaffold produced by the real
   generator (`node examples/generate.mjs`).
+
+### Changed
+
+- `lib/scaffold-core` converted from JavaScript (JSDoc) to TypeScript with
+  exported domain types (`AgentSpec`, `TaskSpec`, `FramedPlan`). Tests and the
+  example generator load it through jiti — the same loader pi uses at runtime.
+  No build step and no new dependencies.

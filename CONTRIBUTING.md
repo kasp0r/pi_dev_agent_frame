@@ -13,14 +13,15 @@ npm install
 npm test
 ```
 
-No build step: the extension is plain TypeScript loaded by pi through jiti,
-and `lib/` is plain JavaScript.
+No build step: `extensions/` and `lib/` are TypeScript loaded by pi through
+jiti. The unit tests and example generator use the same loader, so tests run
+against the real sources with plain `node`.
 
 ## Repository layout
 
 ```text
 extensions/agent-frame.ts   # Pi-facing surface: /frame, /frame-run, frame_scaffold
-lib/scaffold-core.js        # deterministic generator: validation, renderers, writer
+lib/scaffold-core.ts        # deterministic generator: validation, renderers, writer
 skills/agent-scaffolding/   # methodology + references injected into sessions
 prompts/                    # prompt templates (e.g. /scaffold-agents)
 test/                       # node --test unit + extension smoke tests
@@ -29,9 +30,9 @@ examples/                   # committed sample output (node examples/generate.mj
 
 ## Rules that will bite you if missed
 
-- **`lib/scaffold-core.js` stays dependency-free.** No Pi imports, no npm
-  dependencies — it is unit tested with plain `node`. Pi-facing code lives in
-  `extensions/` only.
+- **`lib/scaffold-core.ts` stays dependency-free.** No Pi imports, no npm
+  dependencies — it is loaded through jiti in tests exactly as pi loads it at
+  runtime. Pi-facing code lives in `extensions/` only.
 - **Behavior changes need tests.** Renderer or validation changes go in
   `test/scaffold-core.test.mjs`; command/tool changes go in
   `test/extension-smoke.test.mjs`, which loads the real extension through jiti
@@ -62,5 +63,5 @@ examples/                   # committed sample output (node examples/generate.mj
 - `npm test` must pass.
 - For scaffold-schema changes (new fields in the plan), update the TypeBox
   schema in `extensions/agent-frame.ts`, the validation in
-  `lib/scaffold-core.js`, and the references under `skills/agent-scaffolding/`
+  `lib/scaffold-core.ts`, and the references under `skills/agent-scaffolding/`
   together.

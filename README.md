@@ -241,7 +241,7 @@ recently framed or executed one. Pass the slug explicitly to be sure.
 
 ```text
 extensions/agent-frame.ts        # /frame + /frame-run commands and the frame_scaffold tool
-lib/scaffold-core.js             # deterministic renderers, validation, writer
+lib/scaffold-core.ts             # deterministic renderers, validation, writer
 skills/agent-scaffolding/        # the methodology, references, and template
 prompts/scaffold-agents.md       # /scaffold-agents prompt template
 examples/items-api/              # committed sample scaffold (node examples/generate.mjs)
@@ -256,8 +256,9 @@ npm test
 ```
 
 The test suite covers the scaffold generator (validation, rendering, overwrite
-protection) and loads the real extension through jiti to exercise `/frame`,
-`/frame-run`, and `frame_scaffold` end to end. See [CONTRIBUTING.md](./CONTRIBUTING.md)
+protection) and loads both TypeScript sources through jiti — the same loader pi
+uses at runtime — to exercise `/frame`, `/frame-run`, and `frame_scaffold` end
+to end. See [CONTRIBUTING.md](./CONTRIBUTING.md)
 for the development rules and [CHANGELOG.md](./CHANGELOG.md) for notable
 changes.
 

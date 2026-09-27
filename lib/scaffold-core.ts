@@ -9,26 +9,113 @@
  *   <planDir>/TODO.md      — the shared plan every agent works toward
  *   <agentsDir>/<name>/AGENT.md — one subagent definition per worker
  *
- * This module deliberately has no Pi imports so it can be unit tested with
- * plain `node`. File-system access is additive: validation always happens
- * before anything is written.
+ * This module deliberately has no Pi imports. It is loaded through jiti — by
+ * pi when the extension runs, and by the unit tests / example generator — so
+ * it shares one TypeScript loader across production and test. File-system
+ * access is additive: validation always happens before anything is written.
  */
 
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
-/** @typedef {"read" | "write"} Scope */
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
+
+export interface AgentSpec {
+	name: string;
+	role?: string;
+	description: string;
+	responsibility?: string;
+	tools?: string;
+	thinking?: string;
+	systemPrompt: string;
+}
+
+export interface TaskSpec {
+	id: string;
+	title: string;
+	owner: string;
+	phase?: string;
+	dependsOn?: string[];
+	acceptance: string;
+	evidence?: string;
+}
+
+export interface FramingSpec {
+	summary?: string;
+	successCriteria?: string[];
+	constraints?: string[];
+	nonGoals?: string[];
+	risks?: string[];
+	openQuestions?: string[];
+}
+
+export interface FramedPlan {
+	goal: string;
+	title?: string;
+	framing?: FramingSpec;
+	agents?: AgentSpec[];
+	tasks?: TaskSpec[];
+}
+
+export interface ValidationResult {
+	errors: string[];
+	warnings: string[];
+}
+
+export interface ScaffoldFile {
+	path: string;
+	display: string;
+	kind: string;
+	content: string;
+}
+
+export interface BuildResult extends ValidationResult {
+	files: ScaffoldFile[];
+}
+
+export interface WrittenFile {
+	display: string;
+	kind: string;
+	path: string;
+}
+
+export interface WriteResult {
+	ok: boolean;
+	errors: string[];
+	warnings: string[];
+	files: WrittenFile[];
+}
+
+export interface ScaffoldOptions {
+	cwd: string;
+	planDir: string;
+	agentsDir: string;
+	slug?: string;
+	title?: string;
+	createdAt?: string;
+}
+
+export interface WriteOptions extends ScaffoldOptions {
+	overwrite?: boolean;
+}
+
+interface RenderMeta {
+	slug: string;
+	createdAt: string;
+	planDirLabel: string;
+	agentsDirLabel: string;
+	title?: string;
+}
 
 const READ_ONLY_TOOLS = "read, grep, find, ls";
 const WRITER_TOOLS = "read, grep, find, ls, bash, edit, write";
 
 /**
  * Turn arbitrary goal text into a filesystem-safe, human-readable slug.
- * @param {unknown} input
- * @param {number} [maxLen]
- * @returns {string}
  */
-export function slugify(input, maxLen = 48) {
+export function slugify(input: unknown, maxLen = 48): string {
 	const base = String(input ?? "")
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
@@ -41,22 +128,14 @@ export function slugify(input, maxLen = 48) {
 
 const KEBAB_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-/**
- * @param {string[]} list
- * @returns {string[]}
- */
-function cleanList(list) {
+function cleanList(list: unknown): string[] {
 	if (!Array.isArray(list)) return [];
 	return list
 		.map((item) => String(item ?? "").trim())
 		.filter((item) => item.length > 0);
 }
 
-/**
- * @param {string} value
- * @returns {string}
- */
-function inline(value) {
+function inline(value: unknown): string {
 	return String(value ?? "")
 		.replace(/\r?\n+/g, " ")
 		.replace(/\s+/g, " ")
@@ -66,10 +145,8 @@ function inline(value) {
 /**
  * Emit a safe YAML scalar. JSON double-quoted strings are valid YAML scalars,
  * so this is used whenever the value could contain YAML-significant characters.
- * @param {string} value
- * @returns {string}
  */
-function yamlScalar(value) {
+function yamlScalar(value: string): string {
 	const text = inline(value);
 	if (/^[A-Za-z0-9][A-Za-z0-9 .,/()_@+-]*$/.test(text) && !text.includes(": ")) {
 		return text;
@@ -77,62 +154,34 @@ function yamlScalar(value) {
 	return JSON.stringify(text);
 }
 
-/**
- * @param {string} value
- * @returns {string}
- */
-function bulletList(value, fallback = "_None recorded._") {
-	const items = cleanList(Array.isArray(value) ? value : []);
+function bulletList(value: unknown, fallback = "_None recorded._"): string {
+	const items = cleanList(value);
 	if (items.length === 0) return fallback;
 	return items.map((item) => `- ${item}`).join("\n");
 }
 
-/**
- * @param {string} value
- * @returns {string}
- */
-function checkboxList(value, fallback = "_None recorded._") {
-	const items = cleanList(Array.isArray(value) ? value : []);
+function checkboxList(value: unknown, fallback = "_None recorded._"): string {
+	const items = cleanList(value);
 	if (items.length === 0) return fallback;
 	return items.map((item) => `- [ ] ${item}`).join("\n");
 }
 
 /**
- * @param {string} value
- * @returns {string}
- */
-function indent(text, spaces) {
-	const pad = " ".repeat(spaces);
-	return String(text ?? "")
-		.split("\n")
-		.map((line) => (line.length ? pad + line : line))
-		.join("\n");
-}
-
-/**
  * Detect the first dependency cycle in the task graph.
- * @param {Array<{id: string, dependsOn?: string[]}>} tasks
- * @returns {string[] | null} the cycle path, or null when acyclic
+ * Returns the cycle path, or null when acyclic.
  */
-function findCycle(tasks) {
-	/** @type {Map<string, string[]>} */
-	const graph = new Map();
+function findCycle(tasks: Array<{ id: string; dependsOn?: string[] }>): string[] | null {
+	const graph = new Map<string, string[]>();
 	for (const task of tasks) graph.set(String(task.id), cleanList(task.dependsOn ?? []));
 
 	const WHITE = 0;
 	const GRAY = 1;
 	const BLACK = 2;
-	/** @type {Map<string, number>} */
-	const color = new Map();
+	const color = new Map<string, number>();
 	for (const id of graph.keys()) color.set(id, WHITE);
-	/** @type {string[]} */
-	const stack = [];
+	const stack: string[] = [];
 
-	/**
-	 * @param {string} node
-	 * @returns {string[] | null}
-	 */
-	function visit(node) {
+	function visit(node: string): string[] | null {
 		color.set(node, GRAY);
 		stack.push(node);
 		for (const next of graph.get(node) ?? []) {
@@ -163,15 +212,11 @@ function findCycle(tasks) {
 
 /**
  * Validate a framed plan before any file is written.
- * @param {any} plan
- * @returns {{ errors: string[], warnings: string[] }}
  */
-export function validatePlan(plan) {
-	/** @type {string[]} */
-	const errors = [];
-	/** @type {string[]} */
-	const warnings = [];
-	const source = plan ?? {};
+export function validatePlan(plan: FramedPlan | null | undefined): ValidationResult {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	const source: FramedPlan = plan ?? {};
 	const agents = Array.isArray(source.agents) ? source.agents : [];
 	const tasks = Array.isArray(source.tasks) ? source.tasks : [];
 
@@ -179,8 +224,7 @@ export function validatePlan(plan) {
 	if (agents.length === 0) errors.push("At least one agent is required.");
 	if (tasks.length === 0) errors.push("At least one task is required.");
 
-	/** @type {Set<string>} */
-	const names = new Set();
+	const names = new Set<string>();
 	for (const agent of agents) {
 		const name = inline(agent?.name);
 		if (!name) {
@@ -196,8 +240,7 @@ export function validatePlan(plan) {
 		if (!inline(agent?.systemPrompt)) errors.push(`Agent "${name}" needs a \`systemPrompt\`.`);
 	}
 
-	/** @type {Set<string>} */
-	const ids = new Set();
+	const ids = new Set<string>();
 	for (const task of tasks) {
 		const id = inline(task?.id);
 		if (!id) {
@@ -239,12 +282,7 @@ export function validatePlan(plan) {
 	return { errors, warnings };
 }
 
-/**
- * @param {any} plan
- * @param {{ slug: string, createdAt: string }} meta
- * @returns {string}
- */
-export function renderGoalMd(plan, meta) {
+export function renderGoalMd(plan: FramedPlan, meta: RenderMeta): string {
 	const framing = plan.framing ?? {};
 	const title = inline(plan.title) || inline(plan.goal) || "Untitled goal";
 	return `# Goal — ${title}
@@ -287,12 +325,7 @@ ${bulletList(framing.openQuestions)}
 `;
 }
 
-/**
- * @param {any} plan
- * @param {{ slug: string, createdAt: string, agentsDirLabel: string }} meta
- * @returns {string}
- */
-export function renderRosterMd(plan, meta) {
+export function renderRosterMd(plan: FramedPlan, meta: RenderMeta): string {
 	const agents = Array.isArray(plan.agents) ? plan.agents : [];
 	const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
 	const title = inline(plan.title) || inline(plan.goal) || "Untitled goal";
@@ -356,22 +389,16 @@ ${details || "_No agents defined._"}
 `;
 }
 
-/**
- * @param {any} plan
- * @param {{ slug: string, createdAt: string, agentsDirLabel: string }} meta
- * @returns {string}
- */
-export function renderTodoMd(plan, meta) {
+export function renderTodoMd(plan: FramedPlan, meta: RenderMeta): string {
 	const framing = plan.framing ?? {};
 	const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
 	const title = inline(plan.title) || inline(plan.goal) || "Untitled goal";
 
-	/** @type {Map<string, any[]>} */
-	const phases = new Map();
+	const phases = new Map<string, TaskSpec[]>();
 	for (const task of tasks) {
 		const phase = inline(task.phase) || "Execution";
 		if (!phases.has(phase)) phases.set(phase, []);
-		phases.get(phase).push(task);
+		phases.get(phase)?.push(task);
 	}
 
 	let phaseIndex = 0;
@@ -428,13 +455,7 @@ ${tasks.map((task) => `| \`${inline(task.id)}\` | \`${inline(task.owner)}\` | to
 `;
 }
 
-/**
- * @param {any} agent
- * @param {any} plan
- * @param {{ slug: string, agentsDirLabel: string }} meta
- * @returns {string}
- */
-export function renderAgentMd(agent, plan, meta) {
+export function renderAgentMd(agent: AgentSpec, plan: FramedPlan, meta: RenderMeta): string {
 	const name = inline(agent.name);
 	const tasks = (Array.isArray(plan.tasks) ? plan.tasks : []).filter((task) => inline(task.owner) === name);
 	const tools = inline(agent.tools) || (tasks.some((task) => /write|edit|implement|fix|build/i.test(String(task.title)))
@@ -490,21 +511,9 @@ ${assignment}
 }
 
 /**
- * Resolve a possibly-relative path against a base directory.
- * @param {string} base
- * @param {string} target
- * @returns {string}
- */
-function resolveFrom(base, target) {
-	return resolve(base, target);
-}
-
-/**
  * Check whether a path exists.
- * @param {string} path
- * @returns {Promise<boolean>}
  */
-async function exists(path) {
+async function exists(path: string): Promise<boolean> {
 	try {
 		await access(path);
 		return true;
@@ -515,48 +524,44 @@ async function exists(path) {
 
 /**
  * Build the full set of files for a plan without touching disk.
- * @param {any} plan
- * @param {{ cwd: string, planDir: string, agentsDir: string, slug: string, title?: string, createdAt?: string }} options
- * @returns {{ errors: string[], warnings: string[], files: Array<{ path: string, display: string, kind: string, content: string }> }}
  */
-export function buildScaffold(plan, options) {
+export function buildScaffold(plan: FramedPlan, options: ScaffoldOptions): BuildResult {
 	const validation = validatePlan(plan);
 	const cwd = options.cwd;
 	const slug = slugify(options.slug || plan.title || plan.goal);
-	const planDir = resolveFrom(cwd, options.planDir);
-	const agentsDir = resolveFrom(cwd, options.agentsDir);
+	const planDir = resolve(cwd, options.planDir);
+	const agentsDir = resolve(cwd, options.agentsDir);
 	const createdAt = options.createdAt ?? new Date().toISOString().slice(0, 10);
 	const planDirLabel = relative(cwd, planDir) || ".";
 	const agentsDirLabel = relative(cwd, agentsDir) || ".";
 
-	const meta = {
+	const meta: RenderMeta = {
 		slug,
 		createdAt,
 		planDirLabel,
 		agentsDirLabel,
+		title: options.title,
 	};
-	const planMeta = { ...meta, title: options.title };
 
-	/** @type {Array<{ path: string, display: string, kind: string, content: string }>} */
-	const files = [];
+	const files: ScaffoldFile[] = [];
 	if (validation.errors.length === 0) {
 		files.push({
 			path: join(planDir, "GOAL.md"),
 			display: `${planDirLabel}/GOAL.md`,
 			kind: "goal",
-			content: renderGoalMd(plan, planMeta),
+			content: renderGoalMd(plan, meta),
 		});
 		files.push({
 			path: join(planDir, "ROSTER.md"),
 			display: `${planDirLabel}/ROSTER.md`,
 			kind: "roster",
-			content: renderRosterMd(plan, planMeta),
+			content: renderRosterMd(plan, meta),
 		});
 		files.push({
 			path: join(planDir, "TODO.md"),
 			display: `${planDirLabel}/TODO.md`,
 			kind: "todo",
-			content: renderTodoMd(plan, planMeta),
+			content: renderTodoMd(plan, meta),
 		});
 		for (const agent of plan.agents ?? []) {
 			const name = inline(agent.name);
@@ -564,7 +569,7 @@ export function buildScaffold(plan, options) {
 				path: join(agentsDir, name, "AGENT.md"),
 				display: `${agentsDirLabel}/${name}/AGENT.md`,
 				kind: "agent",
-				content: renderAgentMd(agent, plan, planMeta),
+				content: renderAgentMd(agent, plan, meta),
 			});
 		}
 	}
@@ -575,20 +580,15 @@ export function buildScaffold(plan, options) {
 /**
  * Validate, then write the scaffold. Nothing is written when validation fails
  * or when a target exists and `overwrite` is false.
- *
- * @param {any} plan
- * @param {{ cwd: string, planDir: string, agentsDir: string, slug?: string, title?: string, overwrite?: boolean, createdAt?: string }} options
- * @returns {Promise<{ ok: boolean, errors: string[], warnings: string[], files: Array<{ display: string, kind: string, path: string }> }>}
  */
-export async function writeScaffold(plan, options) {
+export async function writeScaffold(plan: FramedPlan, options: WriteOptions): Promise<WriteResult> {
 	const built = buildScaffold(plan, options);
 	if (built.errors.length > 0) {
 		return { ok: false, errors: built.errors, warnings: built.warnings, files: [] };
 	}
 
 	if (!options.overwrite) {
-		/** @type {string[]} */
-		const conflicts = [];
+		const conflicts: string[] = [];
 		for (const file of built.files) {
 			if (await exists(file.path)) conflicts.push(file.display);
 		}

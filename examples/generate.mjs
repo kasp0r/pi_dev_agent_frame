@@ -1,13 +1,18 @@
 /**
  * Regenerate the committed sample scaffold in examples/items-api/.
  *
- * Runs the real generator (lib/scaffold-core.js) so the example is authentic
+ * Runs the real generator (lib/scaffold-core.ts) so the example is authentic
  * frame_scaffold output, not a hand-written imitation. Idempotent: re-run
  * after changing the renderers to refresh the sample.
+ *
+ * The TS module is loaded through jiti — the same loader pi uses at runtime.
  */
 
 import { fileURLToPath } from "node:url";
-import { writeScaffold } from "../lib/scaffold-core.js";
+import { createJiti } from "jiti";
+
+const jiti = createJiti(import.meta.url);
+const { writeScaffold } = await jiti.import("../lib/scaffold-core.ts");
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 

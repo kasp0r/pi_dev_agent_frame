@@ -21,7 +21,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { slugify, writeScaffold } from "../lib/scaffold-core.js";
+import { slugify, writeScaffold } from "../lib/scaffold-core.ts";
 
 // ---------------------------------------------------------------------------
 // Tool schema

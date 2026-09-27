@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { buildScaffold, slugify, validatePlan, writeScaffold } from "../lib/scaffold-core.js";
+import { createJiti } from "jiti";
+
+// Load the TS module through jiti — the same loader pi uses at runtime.
+const jiti = createJiti(import.meta.url);
+const { buildScaffold, slugify, validatePlan, writeScaffold } = await jiti.import("../lib/scaffold-core.ts");
 
 /** @returns {any} */
 function samplePlan() {
