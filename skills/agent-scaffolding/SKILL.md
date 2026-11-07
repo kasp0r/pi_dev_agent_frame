@@ -23,7 +23,9 @@ Calling the `frame_scaffold` tool writes:
 | `<planDir>/TODO.md` | Phase-grouped task graph with owners, dependencies, acceptance criteria, and evidence |
 | `<agentsDir>/<name>/AGENT.md` | One subagent definition per worker (frontmatter + system prompt + mission assignment) |
 
-Defaults: `<planDir>` = `.pi/frame/<slug>`, `<agentsDir>` = `.pi/agents`.
+Defaults: `<planDir>` = `.pi/frame/<slug>`, `<agentsDir>` =
+`.pi/agents/<slug>`. The plan slug isolates mission-specific definitions, so
+another plan can reuse an agent name without overwriting this plan's workers.
 Generated agents are project-scoped and require project trust to load.
 
 Do **not** hand-write these files. Decide the content, then call `frame_scaffold`
@@ -76,7 +78,9 @@ merge them or separate the work in time via the task graph.
 Heuristics:
 
 - **Read-only first.** Recon, research, and design agents produce evidence;
-  writer agents implement. Do not give a designer or reviewer write tools.
+  writer agents implement. Set `access: "writer"` for implementation roles and
+  use the default `access: "read-only"` for designers and reviewers. Do not rely
+  on task-title keywords to infer write access.
 - **One writer per seam.** Parallel writers on the same files are the most
   common multi-agent failure. Partition by component, not by convenience.
 - **Add a gate, not a cheerleader.** Include a reviewer/verifier when correctness
@@ -95,8 +99,11 @@ For each agent provide:
 - `role` — short label.
 - `description` — one line, used during agent discovery.
 - `responsibility` — what it owns end-to-end.
-- `tools` — a strict allowlist. Read-only: `read, grep, find, ls`. Writers add
-  `bash, edit, write`. Omit to let the generator infer from owned tasks.
+- `access` — `"read-only"` (default) or `"writer"`; writers receive edit/write
+  tools by default and a matching pi-subagents `acceptanceRole`.
+- `tools` — an optional strict allowlist overriding the access default.
+  Read-only: `read, grep, find, ls`. Writers: `read, grep, find, ls, bash, edit, write`.
+  Never combine `access: "read-only"` with `edit` or `write`.
 - `thinking` — optional (`low`/`medium`/`high`/`xhigh`) for genuinely hard roles.
 - `systemPrompt` — a real working prompt: mission, boundaries, method, quality
   bar, what to report, and when to escalate. See
@@ -137,12 +144,17 @@ frame_scaffold({
   goal,                       // verbatim user goal
   title, slug,                // optional; slug is derived when omitted
   framing: { summary, successCriteria, constraints?, nonGoals?, risks?, openQuestions? },
-  agents: [{ name, role, description, responsibility?, tools?, thinking?, systemPrompt }],
+  agents: [{ name, role?, description, responsibility?, access, tools?, thinking?, systemPrompt }],
   tasks:  [{ id, title, owner, phase?, dependsOn?, acceptance, evidence? }],
   planDir?, agentsDir?,       // optional overrides from /frame
-  overwrite?                  // only when the user asked to replace existing files
+  overwrite?,                 // only when the user asked to replace existing files
+  allowOutsideCwd?            // only with explicit operator approval
 })
 ```
+
+Output paths stay inside the project unless the operator explicitly passed
+`--allow-outside-cwd`; in that case set `allowOutsideCwd: true`. Writes are
+staged and rolled back on failure, and support cancellation.
 
 If the tool returns validation errors, fix the plan and call it again. Do not
 fall back to writing files by hand. If it reports that files already exist, do

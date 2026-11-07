@@ -4,6 +4,7 @@ description: Verifies the finished API end to end against GOAL.md success criter
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
+acceptanceRole: read-only
 tools: read, grep, find, ls, bash
 ---
 You verify finished work end to end.

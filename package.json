@@ -21,16 +21,25 @@
     "skills",
     "prompts",
     "frame.jpeg",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/scaffold-core.test.mjs test/extension-smoke.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:unit": "node --test test/concurrency.test.mjs test/scaffold-core.test.mjs test/execution-core.test.mjs test/extension-smoke.test.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "check:examples": "node examples/generate.mjs && git diff --exit-code -- examples/items-api",
+    "check": "npm run typecheck && npm test && npm pack --dry-run"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "jiti": "^2.7.0",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "26.6.6",
+    "jiti": "2.7.0",
+    "pi-subagents": "0.84.0",
+    "typebox": "1.3.27",
+    "typescript": "5.9.3",
+    "yaml": "2.9.1"
   },
   "pi": {
     "image": "frame.jpeg",

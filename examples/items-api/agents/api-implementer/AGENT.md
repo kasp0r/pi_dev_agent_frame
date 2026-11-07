@@ -4,6 +4,7 @@ description: Implements the /v2/items routes and their rate limiting
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
+acceptanceRole: writer
 tools: read, grep, find, ls, bash, edit, write
 ---
 You implement HTTP API seams in this service. Work only in src/routes/, src/middleware/, and their test files.

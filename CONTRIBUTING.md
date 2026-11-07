@@ -10,6 +10,7 @@ license your contribution under the same terms.
 git clone <repo-url>
 cd pi-agent-frame
 npm install
+npm run typecheck
 npm test
 ```
 
@@ -21,7 +22,9 @@ against the real sources with plain `node`.
 
 ```text
 extensions/agent-frame.ts   # Pi-facing surface: /frame, /frame-run, frame_scaffold
-lib/scaffold-core.ts        # deterministic generator: validation, renderers, writer
+lib/scaffold-core.ts        # deterministic generator: indexed renderers, validation, writer
+lib/execution-core.ts       # deterministic TODO parser, scope, and launch layers
+lib/concurrency.ts          # bounded filesystem concurrency
 skills/agent-scaffolding/   # methodology + references injected into sessions
 prompts/                    # prompt templates (e.g. /scaffold-agents)
 test/                       # node --test unit + extension smoke tests
@@ -30,13 +33,16 @@ examples/                   # committed sample output (node examples/generate.mj
 
 ## Rules that will bite you if missed
 
-- **`lib/scaffold-core.ts` stays dependency-free.** No Pi imports, no npm
-  dependencies — it is loaded through jiti in tests exactly as pi loads it at
-  runtime. Pi-facing code lives in `extensions/` only.
-- **Behavior changes need tests.** Renderer or validation changes go in
-  `test/scaffold-core.test.mjs`; command/tool changes go in
-  `test/extension-smoke.test.mjs`, which loads the real extension through jiti
-  exactly like pi does.
+- **`lib/scaffold-core.ts`, `lib/execution-core.ts`, and `lib/concurrency.ts`
+  stay dependency-free.** No Pi imports, no npm dependencies — they are loaded
+  through jiti in tests exactly as pi loads them at runtime. Pi-facing code lives
+  in `extensions/` only.
+- **Behavior changes need tests.** Renderer, validation, or writer changes go in
+  `test/scaffold-core.test.mjs`; execution parsing and layering go in
+  `test/execution-core.test.mjs`; command/tool changes go in
+  `test/extension-smoke.test.mjs`. `test/package-integration.test.mjs` packs and
+  installs the artifact, exercises real YAML/pi-subagents discovery, and loads it
+  through Pi RPC without model calls.
 - **Regenerate the example.** If you change a renderer, run
   `node examples/generate.mjs` and commit the refreshed `examples/items-api/`.
 - **Keep flag docs in sync.** `parseArgs` / `parseRunArgs`, the command
@@ -47,12 +53,15 @@ examples/                   # committed sample output (node examples/generate.mj
 - **Argument robustness:** Ensure any changes to `parseArgs` or `parseRunArgs`
   handle edge cases like quoted strings, extra whitespace, or unexpected flags
   without crashing.
-- **Path security:** Always validate that generated paths (e.g., for `planDir` or
-  `agentsDir`) remain within the intended project boundaries to prevent
-  directory traversal.
+- **Path security:** `planDir` and `agentsDir` must remain inside the resolved
+  project cwd, including existing symlink ancestors. External output requires
+  explicit operator approval via `allowOutsideCwd`; never weaken this silently.
 - **Actionable errors:** When a tool fails (like `frame_scaffold`), return error
   messages that are prescriptive—don't just say "it failed," tell the user
   *how* to fix the input or what to check in their plan.
+- **Schema alignment:** Keep `AgentSpec`, `TaskSpec`, and `FramingSpec` aligned
+  with the TypeBox schema, including optional fields, access roles, thinking
+  levels, and stable task-id validation.
 - **Style:** tabs, JSDoc on exported helpers, and user-facing notifications
   through `ctx.ui.notify`.
 
@@ -60,7 +69,8 @@ examples/                   # committed sample output (node examples/generate.mj
 
 - One concern per PR; describe the user-visible change so it can go straight
   into `CHANGELOG.md`.
-- `npm test` must pass.
+- `npm run typecheck` and `npm test` must pass; CI runs both on Node 22 and 24,
+  checks generated examples, and inspects the package tarball.
 - For scaffold-schema changes (new fields in the plan), update the TypeBox
   schema in `extensions/agent-frame.ts`, the validation in
   `lib/scaffold-core.ts`, and the references under `skills/agent-scaffolding/`

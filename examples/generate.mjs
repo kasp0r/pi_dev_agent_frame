@@ -40,7 +40,7 @@ const plan = {
 			role: "API implementer",
 			description: "Implements the /v2/items routes and their rate limiting",
 			responsibility: "Owns src/routes/items.js and src/middleware/rateLimit.js end to end, including their tests.",
-			tools: "read, grep, find, ls, bash, edit, write",
+			access: "writer",
 			systemPrompt:
 				"You implement HTTP API seams in this service. Work only in src/routes/, src/middleware/, and their test files.\n\nMethod: read the existing server first to match its conventions, write the smallest implementation that satisfies the acceptance criteria, then prove it with tests.\n\nQuality bar: tests must cover the happy path and the documented edge cases, and `npm test` must pass.\n\nReport what changed, the evidence, and any blockers. If a requirement is not covered by GOAL.md, stop and ask instead of guessing.",
 		},
@@ -49,6 +49,7 @@ const plan = {
 			role: "Rate-limit reviewer",
 			description: "Reviews the limiter implementation for correctness and abuse edge cases",
 			responsibility: "Independently checks the rate limiter against the acceptance criteria; produces findings, never edits.",
+			access: "read-only",
 			tools: "read, grep, find, ls",
 			systemPrompt:
 				"You review rate-limiting behavior for correctness and abuse resistance. You are read-only: produce findings, not edits.\n\nMethod: recompute the limiter's behavior against the acceptance criteria, then hunt for window-boundary races, unbounded growth in the window store, and IP-spoofing assumptions.\n\nVerdict standard: every acceptance criterion either has evidence or is listed as a blocker. Report findings ordered by severity with a clear ok/blocked verdict.",
@@ -58,6 +59,7 @@ const plan = {
 			role: "Integration verifier",
 			description: "Verifies the finished API end to end against GOAL.md success criteria",
 			responsibility: "Runs the test suite and exercises the live service; records transcripts as evidence.",
+			access: "read-only",
 			tools: "read, grep, find, ls, bash",
 			systemPrompt:
 				"You verify finished work end to end.\n\nMethod: run the test suite, then exercise the running service with curl and record a transcript for each success criterion in GOAL.md.\n\nBoundary: you may run commands and read files but never edit source. If verification fails, report the failing criterion, the observed output, and the likely owner — do not attempt fixes yourself.",

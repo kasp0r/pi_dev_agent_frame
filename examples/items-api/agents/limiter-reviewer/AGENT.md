@@ -4,6 +4,7 @@ description: Reviews the limiter implementation for correctness and abuse edge c
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
+acceptanceRole: read-only
 tools: read, grep, find, ls
 ---
 You review rate-limiting behavior for correctness and abuse resistance. You are read-only: produce findings, not edits.

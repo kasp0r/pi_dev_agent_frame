@@ -2,7 +2,9 @@
 
 An agent is a Markdown file with YAML frontmatter (metadata) and a system prompt
 body. `pi-agent-frame` writes one per worker to
-`<agentsDir>/<name>/AGENT.md`, where `<agentsDir>` defaults to `.pi/agents`.
+`<agentsDir>/<name>/AGENT.md`, where `<agentsDir>` defaults to
+`.pi/agents/<plan-slug>`. Plan-scoped directories prevent identical role names
+from different missions overwriting each other.
 
 `pi-subagents` discovers project agents recursively under `.pi/agents/**/*.md`,
 so a directory-per-agent layout works. The runtime agent name comes from the
@@ -17,8 +19,9 @@ description: Implements the public API seam   # required, one line
 systemPromptMode: replace        # use the body as the whole system prompt
 inheritProjectContext: true      # let the child see project context
 inheritSkills: false             # keep the child focused
+acceptanceRole: writer           # read-only|writer; matches explicit access
 tools: read, grep, find, ls, bash, edit, write   # strict allowlist
-thinking: high                   # optional: minimal|low|medium|high|xhigh
+thinking: high                   # optional: off|minimal|low|medium|high|xhigh|max
 ---
 ```
 
@@ -30,8 +33,8 @@ Common tool sets:
 
 | Role type | Tools |
 | --- | --- |
-| Recon / research / review | `read, grep, find, ls` |
-| Writer / implementer | `read, grep, find, ls, bash, edit, write` |
+| Recon / research / review (`access: read-only`) | `read, grep, find, ls` |
+| Writer / implementer (`access: writer`) | `read, grep, find, ls, bash, edit, write` |
 | Coordinator (with bridge) | add `contact_supervisor` |
 
 ## Body layout
@@ -59,7 +62,7 @@ hand only when needed:
 | `package` | Namespaces the runtime name as `{package}.{name}` |
 | `aliases` | Alternate names for selection |
 | `advertise` | Shows the agent to the parent before delegation |
-| `acceptance` / `acceptanceRole` | Default evidence/acceptance policy |
+| `acceptance` | Default evidence/acceptance policy |
 | `async` | Default background launch for the agent |
 | `timeoutMs` | Default run-level max runtime |
 | `skills` / `skillPath` | Invocation-private skills |
@@ -79,5 +82,7 @@ unless overriding is intentional — and state that intent in the agent's
 - `name` is unique, kebab-case, and not an accidental builtin collision.
 - `description` is specific enough to decide when to use the agent.
 - `tools` matches the role: read-only roles must not have write tools.
+- `access` explicitly selects `read-only` or `writer`; task titles never grant
+  write access, and `acceptanceRole` matches this selection.
 - The system prompt names the boundary and the escalation condition.
 - The agent owns at least one task in `TODO.md`.

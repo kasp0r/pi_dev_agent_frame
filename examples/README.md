@@ -11,7 +11,9 @@ Sample output of:
 framed against a small hypothetical Node service. `GOAL.md`, `ROSTER.md`, and
 `TODO.md` are byte-for-byte what the `frame_scaffold` tool writes, and
 `agents/*/AGENT.md` are the generated subagent definitions that pi-subagents
-would discover under `.pi/agents/` in a real project.
+would discover under `.pi/agents/items-api/` in a real project. The sample uses
+an explicit example-local output directory; runtime scaffolds are plan-scoped by
+default.
 
 Nothing here is wired into a runnable service — the example exists so you can
 see the output before framing your own goal.
@@ -19,7 +21,7 @@ see the output before framing your own goal.
 ### Regenerating
 
 The sample is produced by the real generator, not written by hand. After
-changing the renderers in `lib/scaffold-core.js`, refresh it with:
+changing the renderers in `lib/scaffold-core.ts`, refresh it with:
 
 ```bash
 node examples/generate.mjs

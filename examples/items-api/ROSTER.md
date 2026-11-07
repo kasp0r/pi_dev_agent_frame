@@ -8,11 +8,11 @@ through the task graph in [`TODO.md`](./TODO.md), never edited concurrently.
 
 ## At a glance
 
-| Agent | Role | Responsibility | Tasks |
-| --- | --- | --- | --- |
-| `api-implementer` | API implementer | Implements the /v2/items routes and their rate limiting | `T1`, `T2`, `T3` |
-| `limiter-reviewer` | Rate-limit reviewer | Reviews the limiter implementation for correctness and abuse edge cases | `T4` |
-| `integration-verifier` | Integration verifier | Verifies the finished API end to end against GOAL.md success criteria | `T5` |
+| Agent | Role | Access | Responsibility | Tasks |
+| --- | --- | --- | --- | --- |
+| `api-implementer` | API implementer | writer | Implements the /v2/items routes and their rate limiting | `T1`, `T2`, `T3` |
+| `limiter-reviewer` | Rate-limit reviewer | read-only | Reviews the limiter implementation for correctness and abuse edge cases | `T4` |
+| `integration-verifier` | Integration verifier | read-only | Verifies the finished API end to end against GOAL.md success criteria | `T5` |
 
 ## Agent briefs
 

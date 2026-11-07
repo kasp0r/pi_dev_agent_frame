@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic `lib/execution-core` planner: parses generated plans, validates
+  statuses and roster owners, intersects `--phase`/`--from` scope, and computes
+  parallel topological layers and conservative evidence gates before kickoff.
+- Explicit agent `access: read-only | writer`, matching `acceptanceRole`
+  frontmatter, stable task-id validation, and validated thinking levels.
+- Strict TypeScript checking, pinned development dependencies and lockfile,
+  Node 22/24 CI, and a packed-package integration test covering YAML parsing,
+  real pi-subagents discovery, and extension loading through Pi RPC.
+
+### Changed
+
+- Default generated agents now live under `.pi/agents/<slug>/`, isolating
+  mission-specific definitions so plans can reuse names without overwriting.
+- Bounded independent plan-discovery and scaffold filesystem operations,
+  deduplicated directory creation, indexed task ownership for rendering, and
+  deterministic newest-plan ordering.
+- `/frame` and `/frame-run` now share a stricter argument parser with quoted
+  values, `--flag=value`, option aliases, and `--` positional delimiter support.
+- Scaffold writes are staged and rolled back on commit failure, honor abort
+  signals, and stay inside the project by default. External paths require
+  `--allow-outside-cwd` or `allowOutsideCwd: true`.
+
+### Fixed
+
+- Reject unknown flags, missing option values, unterminated quotes, and
+  non-positive `--phase` values before starting work; preserve apostrophes in
+  ordinary goal text.
+- Escape Markdown table cells and YAML frontmatter scalars so pipes, comment
+  markers, and other punctuation cannot corrupt generated scaffold structure.
+- Use atomic no-replace hard links and exclusive staging when `overwrite` is
+  false, closing the overwrite race between conflict preflight and writing;
+  reject symbolic-link targets and directory escapes.
+
 ## [0.1.0] - 2026-09-27
 
 ### Added

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, utimes } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -102,7 +102,7 @@ test("frame_scaffold writes the full scaffold through the extension", async () =
 		assert.equal(result.details.planDir, ".pi/frame/greeting-cli");
 		const todo = await readFile(join(cwd, ".pi/frame/greeting-cli/TODO.md"), "utf8");
 		assert.ok(todo.includes("Implement greet"));
-		const agent = await readFile(join(cwd, ".pi/agents/cli-implementer/AGENT.md"), "utf8");
+		const agent = await readFile(join(cwd, ".pi/agents/greeting-cli/cli-implementer/AGENT.md"), "utf8");
 		assert.ok(agent.includes("name: cli-implementer"));
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
@@ -193,6 +193,49 @@ test("/frame parses --out and --agents overrides", async () => {
 	assert.ok(message.includes("goal here"));
 });
 
+test("/frame supports equals forms, aliases, and natural-language apostrophes", async () => {
+	const pi = createPi();
+	agentFrame(pi);
+	const { ctx } = createCommandContext();
+	await pi.commands
+		.get("frame")
+		.handler(
+			'--plan-dir="docs/my plan" --agents-dir=.pi/custom --slug=my-plan --allow-outside-cwd don\'t break quoting',
+			ctx,
+		);
+	const message = pi.messages[0];
+	assert.ok(message.includes("planDir override: docs/my plan"));
+	assert.ok(message.includes("agentsDir override: .pi/custom"));
+	assert.ok(message.includes("slug override: my-plan"));
+	assert.ok(message.includes("allowOutsideCwd: true"));
+	assert.ok(message.includes('Goal (verbatim from the user):\n"""\ndon\'t break quoting\n"""'));
+});
+
+test("/frame rejects unknown or incomplete options without prompting", async () => {
+	const pi = createPi();
+	agentFrame(pi);
+	const { ctx, notifications, editorCalls } = createCommandContext();
+
+	await pi.commands.get("frame").handler("--out", ctx);
+	await pi.commands.get("frame").handler("--unknown some goal", ctx);
+	await pi.commands.get("frame").handler('"unterminated', ctx);
+
+	assert.equal(editorCalls.length, 0);
+	assert.equal(pi.messages.length, 0);
+	assert.ok(notifications.some((n) => n.level === "warning" && n.message.includes('Option "--out"')));
+	assert.ok(notifications.some((n) => n.level === "warning" && n.message.includes('Unknown option "--unknown"')));
+	assert.ok(notifications.some((n) => n.level === "warning" && n.message.includes("Unterminated double quote")));
+});
+
+test("/frame accepts a goal beginning with -- after the option delimiter", async () => {
+	const pi = createPi();
+	agentFrame(pi);
+	const { ctx } = createCommandContext();
+	await pi.commands.get("frame").handler("-- --dry-run means no execution", ctx);
+	assert.equal(pi.messages.length, 1);
+	assert.ok(pi.messages[0].includes("--dry-run means no execution"));
+});
+
 // ---------------------------------------------------------------------------
 // /frame-run
 // ---------------------------------------------------------------------------
@@ -206,6 +249,7 @@ function planParams(goal, agentName = "api-implementer") {
 				name: agentName,
 				role: "Implementer",
 				description: `Implements ${goal}`,
+				access: "writer",
 				systemPrompt: "Implement the seam only.",
 			},
 		],
@@ -220,6 +264,41 @@ async function scaffoldPlan(pi, cwd, goal, agentName) {
 	const result = await tool.execute(`call-${goal}`, planParams(goal, agentName), undefined, undefined, { cwd });
 	assert.equal(result.details.ok, true, result.content[0].text);
 }
+
+test("frame_scaffold honors tool cancellation without writing", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "agent-frame-abort-tool-"));
+	try {
+		const pi = createPi();
+		agentFrame(pi);
+		const controller = new AbortController();
+		controller.abort();
+		const result = await pi.tools
+			.get("frame_scaffold")
+			.execute("call-abort", planParams("Cancelled plan"), controller.signal, undefined, { cwd });
+		assert.equal(result.details.ok, false);
+		assert.deepEqual(result.details.errors, ["Cancelled by operator."]);
+		assert.ok(result.content[0].text.includes("cancelled"));
+		await assert.rejects(readFile(join(cwd, ".pi/frame/cancelled-plan/TODO.md"), "utf8"));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("frame_scaffold isolates identical agent names by plan slug", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "agent-frame-isolation-"));
+	try {
+		const pi = createPi();
+		agentFrame(pi);
+		await scaffoldPlan(pi, cwd, "First plan", "shared-worker");
+		await scaffoldPlan(pi, cwd, "Second plan", "shared-worker");
+		const first = await readFile(join(cwd, ".pi/agents/first-plan/shared-worker/AGENT.md"), "utf8");
+		const second = await readFile(join(cwd, ".pi/agents/second-plan/shared-worker/AGENT.md"), "utf8");
+		assert.ok(first.includes("Mission: First plan"));
+		assert.ok(second.includes("Mission: Second plan"));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
 
 test("/frame-run without any plan warns and sends nothing", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "agent-frame-run-"));
@@ -277,6 +356,45 @@ test("/frame-run with a slug injects the execution kickoff", async () => {
 	}
 });
 
+test("/frame-run rejects unknown scope targets with actionable warnings", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "agent-frame-run-"));
+	try {
+		const pi = createPi();
+		agentFrame(pi);
+		await scaffoldPlan(pi, cwd, "Items API");
+		const { ctx, notifications } = createCommandContext({ cwd });
+		await pi.commands.get("frame-run").handler("items-api --phase 9", ctx);
+		await pi.commands.get("frame-run").handler("items-api --from T9", ctx);
+		assert.equal(pi.messages.length, 0);
+		assert.ok(notifications.some((n) => n.message.includes("Unknown phase 9")));
+		assert.ok(notifications.some((n) => n.message.includes('Unknown from-task "T9"')));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("/frame-run stops without kickoff when every selected task is done", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "agent-frame-run-"));
+	try {
+		const pi = createPi();
+		agentFrame(pi);
+		await scaffoldPlan(pi, cwd, "Items API");
+		const todoPath = join(cwd, ".pi/frame/items-api/TODO.md");
+		const todo = await readFile(todoPath, "utf8");
+		await writeFile(
+			todoPath,
+			todo.replace("- [ ] **T1**", "- [x] **T1**").replace("| `T1` | `api-implementer` | todo |", "| `T1` | `api-implementer` | done |"),
+			"utf8",
+		);
+		const { ctx, notifications } = createCommandContext({ cwd });
+		await pi.commands.get("frame-run").handler("items-api", ctx);
+		assert.equal(pi.messages.length, 0);
+		assert.ok(notifications.some((n) => n.level === "info" && n.message.includes("already done")));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("/frame-run defaults to the newest plan and lists alternatives", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "agent-frame-run-"));
 	try {
@@ -307,15 +425,16 @@ test("/frame-run flags shape scope and mode", async () => {
 		await scaffoldPlan(pi, cwd, "Items API");
 		const { ctx } = createCommandContext({ cwd });
 
-		await pi.commands.get("frame-run").handler("--dry-run --phase 2 items-api", ctx);
+		await pi.commands.get("frame-run").handler("--dry-run --phase 1 items-api", ctx);
 		let message = pi.messages[pi.messages.length - 1];
 		assert.ok(message.includes("Mode: dry-run"));
 		assert.ok(message.includes("do NOT launch"));
-		assert.ok(message.includes("phase 2"));
+		assert.ok(message.includes("phase 1"));
+		assert.ok(message.includes("| Layer | Task | Title | Owner | Gate |"));
 
-		await pi.commands.get("frame-run").handler("--from T3 items-api", ctx);
+		await pi.commands.get("frame-run").handler("--from T1 items-api", ctx);
 		message = pi.messages[pi.messages.length - 1];
-		assert.ok(message.includes("Resume from task T3"));
+		assert.ok(message.includes("Resume from task T1"));
 
 		await pi.commands.get("frame-run").handler("items api", ctx);
 		message = pi.messages[pi.messages.length - 1];
@@ -348,6 +467,21 @@ test("/frame-run accepts a custom --plan directory", async () => {
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
+});
+
+test("/frame-run rejects malformed scope options before discovering plans", async () => {
+	const pi = createPi();
+	agentFrame(pi);
+	const { ctx, notifications } = createCommandContext();
+
+	await pi.commands.get("frame-run").handler("--phase 0 items-api", ctx);
+	await pi.commands.get("frame-run").handler("--from", ctx);
+	await pi.commands.get("frame-run").handler("--dry-run=yes items-api", ctx);
+
+	assert.equal(pi.messages.length, 0);
+	assert.ok(notifications.some((n) => n.message.includes("positive integer")));
+	assert.ok(notifications.some((n) => n.message.includes('Option "--from"')));
+	assert.ok(notifications.some((n) => n.message.includes("does not take a value")));
 });
 
 test("/frame-run refuses to run while the agent is busy", async () => {

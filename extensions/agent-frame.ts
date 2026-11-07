@@ -3,7 +3,7 @@
  *
  * Two entry points:
  *
- *  - `/frame [--out <dir>] [--agents <dir>] [--name <slug>] [goal...]`
+ *  - `/frame [--out <dir>] [--agents <dir>] [--name <slug>] [--allow-outside-cwd] [goal...]`
  *    Asks for the goal (interactive editor when omitted), then hands the
  *    agent-scaffolding workflow to the current session.
  *
@@ -22,30 +22,48 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { slugify, writeScaffold } from "../lib/scaffold-core.ts";
+import { buildExecutionPlan, formatExecutionPlan } from "../lib/execution-core.ts";
+import { mapConcurrent } from "../lib/concurrency.ts";
 
 // ---------------------------------------------------------------------------
 // Tool schema
 // ---------------------------------------------------------------------------
 
 const AgentSpec = Type.Object({
-	name: Type.String({ description: "Unique lower-case kebab-case agent name, e.g. api-implementer" }),
-	role: Type.String({ description: "Short role label, e.g. 'API implementer' or 'Independent reviewer'" }),
+	name: Type.String({
+		pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+		description: "Unique lower-case kebab-case agent name, e.g. api-implementer",
+	}),
+	role: Type.Optional(Type.String({ description: "Short role label, e.g. 'API implementer' or 'Independent reviewer'" })),
 	description: Type.String({
 		description: "One-line capability description shown during agent discovery",
 	}),
 	responsibility: Type.Optional(Type.String({ description: "What this agent owns end-to-end, in one or two sentences" })),
+	access: Type.Optional(
+		Type.Union([Type.Literal("read-only"), Type.Literal("writer")], {
+			description: "Capability role. Writers get edit/write tools by default; read-only is the safe default.",
+		}),
+	),
 	tools: Type.Optional(
 		Type.String({
 			description:
-				"Comma-separated child tool allowlist, e.g. 'read, grep, find, ls, bash, edit, write'. Defaults to a read-only set, or a writer set when the agent owns implementation tasks.",
+				"Comma-separated child tool allowlist, e.g. 'read, grep, find, ls, bash, edit, write'. Defaults are determined by access: read-only or writer.",
 		}),
 	),
-	thinking: Type.Optional(Type.String({ description: "Optional thinking level: minimal, low, medium, high, xhigh" })),
+	thinking: Type.Optional(
+		Type.Union(
+			["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => Type.Literal(level)),
+			{ description: "Optional thinking level" },
+		),
+	),
 	systemPrompt: Type.String({ description: "Full system prompt for the agent, in markdown" }),
 });
 
 const TaskSpec = Type.Object({
-	id: Type.String({ description: "Stable task id, e.g. T1 or T1.2" }),
+	id: Type.String({
+		pattern: "^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$",
+		description: "Stable task id, e.g. T1 or T1.2",
+	}),
 	title: Type.String({ description: "Imperative task title" }),
 	owner: Type.String({ description: "Name of the accountable agent" }),
 	phase: Type.Optional(Type.String({ description: "Phase label; defaults to 'Execution'" })),
@@ -75,10 +93,13 @@ const FrameParams = Type.Object({
 	),
 	agentsDir: Type.Optional(
 		Type.String({
-			description: `Directory for generated AGENT.md files (default: ${CONFIG_DIR_NAME}/agents)`,
+			description: `Directory for generated AGENT.md files (default: ${CONFIG_DIR_NAME}/agents/<slug>)`,
 		}),
 	),
 	overwrite: Type.Optional(Type.Boolean({ description: "Overwrite existing scaffold files (default false)" })),
+	allowOutsideCwd: Type.Optional(
+		Type.Boolean({ description: "Explicitly permit planDir/agentsDir outside the project cwd (default false)" }),
+	),
 });
 
 // ---------------------------------------------------------------------------
@@ -93,43 +114,140 @@ async function loadSkillBody(): Promise<string> {
 	return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
 }
 
+function tokenize(raw: string): { tokens: string[]; errors: string[] } {
+	const tokens: string[] = [];
+	const errors: string[] = [];
+	let token = "";
+	let quote: '"' | "'" | null = null;
+	let started = false;
+
+	const flush = () => {
+		if (!started) return;
+		tokens.push(token);
+		token = "";
+		started = false;
+	};
+
+	for (const char of raw) {
+		if (quote) {
+			if (char === quote) quote = null;
+			else token += char;
+			continue;
+		}
+		// Quotes group text at token boundaries (and after --flag=). Apostrophes
+		// inside ordinary words remain literal, so goals such as "don't" work.
+		if ((char === '"' || char === "'") && (token.length === 0 || token.endsWith("="))) {
+			quote = char;
+			started = true;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			flush();
+			continue;
+		}
+		token += char;
+		started = true;
+	}
+	if (quote) errors.push(`Unterminated ${quote === '"' ? "double" : "single"} quote.`);
+	flush();
+	return { tokens, errors };
+}
+
+interface ParsedCommandLine {
+	values: Map<string, string>;
+	flags: Set<string>;
+	positionals: string[];
+	errors: string[];
+}
+
+interface OptionDefinition {
+	aliases: string[];
+	takesValue?: boolean;
+}
+
+/** Parse the small, shared command-line grammar used by both commands. */
+function parseCommandLine(raw: string, definitions: Record<string, OptionDefinition>): ParsedCommandLine {
+	const { tokens, errors } = tokenize(raw);
+	const options = new Map<string, { name: string; takesValue: boolean }>();
+	for (const [name, definition] of Object.entries(definitions)) {
+		for (const alias of definition.aliases) {
+			options.set(alias, { name, takesValue: definition.takesValue ?? true });
+		}
+	}
+
+	const values = new Map<string, string>();
+	const flags = new Set<string>();
+	const positionals: string[] = [];
+
+	for (let i = 0; i < tokens.length; i += 1) {
+		const token = tokens[i];
+		if (token === "--") {
+			positionals.push(...tokens.slice(i + 1));
+			break;
+		}
+
+		const equalsAt = token.indexOf("=");
+		const flag = equalsAt === -1 ? token : token.slice(0, equalsAt);
+		const option = options.get(flag);
+		if (!option) {
+			if (token.startsWith("--")) errors.push(`Unknown option "${token}".`);
+			else positionals.push(token);
+			continue;
+		}
+
+		if (!option.takesValue) {
+			if (equalsAt !== -1) errors.push(`Option "${flag}" does not take a value.`);
+			else flags.add(option.name);
+			continue;
+		}
+
+		let value: string | undefined;
+		if (equalsAt !== -1) {
+			value = token.slice(equalsAt + 1);
+		} else {
+			const next = tokens[i + 1];
+			if (next !== undefined && !next.startsWith("--")) {
+				value = next;
+				i += 1;
+			}
+		}
+		value = value?.trim();
+		if (!value) errors.push(`Option "${flag}" requires a non-empty value.`);
+		else values.set(option.name, value);
+	}
+
+	return {
+		values,
+		flags,
+		positionals,
+		errors,
+	};
+}
+
 interface FrameArgs {
 	planDir?: string;
 	agentsDir?: string;
 	name?: string;
 	goal: string;
-}
-
-function stripQuotes(value: string | undefined): string | undefined {
-	if (value === undefined) return undefined;
-	const trimmed = value.trim();
-	if (
-		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-		(trimmed.startsWith("'") && trimmed.endsWith("'"))
-	) {
-		return trimmed.slice(1, -1);
-	}
-	return trimmed;
+	allowOutsideCwd: boolean;
+	errors: string[];
 }
 
 function parseArgs(raw: string): FrameArgs {
-	const tokens = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-	const goalParts: string[] = [];
-	let planDir: string | undefined;
-	let agentsDir: string | undefined;
-	let name: string | undefined;
-
-	for (let i = 0; i < tokens.length; i += 1) {
-		const token = tokens[i];
-		if (token === "--out" || token === "--plan-dir") planDir = stripQuotes(tokens[++i]);
-		else if (token.startsWith("--out=")) planDir = stripQuotes(token.slice("--out=".length));
-		else if (token === "--agents" || token === "--agents-dir") agentsDir = stripQuotes(tokens[++i]);
-		else if (token.startsWith("--agents=")) agentsDir = stripQuotes(token.slice("--agents=".length));
-		else if (token === "--name" || token === "--slug") name = stripQuotes(tokens[++i]);
-		else goalParts.push(token);
-	}
-
-	return { planDir, agentsDir, name, goal: goalParts.join(" ").trim() };
+	const parsed = parseCommandLine(raw, {
+		planDir: { aliases: ["--out", "--plan-dir"] },
+		agentsDir: { aliases: ["--agents", "--agents-dir"] },
+		name: { aliases: ["--name", "--slug"] },
+		allowOutsideCwd: { aliases: ["--allow-outside-cwd"], takesValue: false },
+	});
+	return {
+		planDir: parsed.values.get("planDir"),
+		agentsDir: parsed.values.get("agentsDir"),
+		name: parsed.values.get("name"),
+		goal: parsed.positionals.join(" ").trim(),
+		allowOutsideCwd: parsed.flags.has("allowOutsideCwd"),
+		errors: parsed.errors,
+	};
 }
 
 async function buildKickoff(goal: string, args: FrameArgs, cwd: string): Promise<string> {
@@ -138,6 +256,7 @@ async function buildKickoff(goal: string, args: FrameArgs, cwd: string): Promise
 	if (args.planDir) overrides.push(`- planDir override: ${args.planDir}`);
 	if (args.agentsDir) overrides.push(`- agentsDir override: ${args.agentsDir}`);
 	if (args.name) overrides.push(`- slug override: ${args.name}`);
+	if (args.allowOutsideCwd) overrides.push("- allowOutsideCwd: true (explicitly approved by the operator)");
 
 	return `[agent-frame] Goal framing request
 
@@ -184,34 +303,27 @@ interface FrameRunArgs {
 	phase?: string;
 	from?: string;
 	dryRun: boolean;
+	errors: string[];
 }
 
 function parseRunArgs(raw: string): FrameRunArgs {
-	const tokens = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-	const slugParts: string[] = [];
-	let planDir: string | undefined;
-	let phase: string | undefined;
-	let from: string | undefined;
-	let dryRun = false;
-
-	for (let i = 0; i < tokens.length; i += 1) {
-		const token = tokens[i];
-		if (token === "--dry-run") dryRun = true;
-		else if (token === "--plan" || token === "--plan-dir") planDir = stripQuotes(tokens[++i]);
-		else if (token.startsWith("--plan=")) planDir = stripQuotes(token.slice("--plan=".length));
-		else if (token === "--phase") phase = stripQuotes(tokens[++i]);
-		else if (token.startsWith("--phase=")) phase = stripQuotes(token.slice("--phase=".length));
-		else if (token === "--from") from = stripQuotes(tokens[++i]);
-		else if (token.startsWith("--from=")) from = stripQuotes(token.slice("--from=".length));
-		else slugParts.push(token);
+	const parsed = parseCommandLine(raw, {
+		planDir: { aliases: ["--plan", "--plan-dir"] },
+		phase: { aliases: ["--phase"] },
+		from: { aliases: ["--from"] },
+		dryRun: { aliases: ["--dry-run"], takesValue: false },
+	});
+	const phase = parsed.values.get("phase");
+	if (phase && !/^[1-9]\d*$/.test(phase)) {
+		parsed.errors.push(`Option "--phase" expects a positive integer, received "${phase}".`);
 	}
-
 	return {
-		planDir,
+		planDir: parsed.values.get("planDir"),
 		phase,
-		from,
-		dryRun,
-		slug: slugParts.length > 0 ? slugify(slugParts.join("-")) : undefined,
+		from: parsed.values.get("from"),
+		dryRun: parsed.flags.has("dryRun"),
+		slug: parsed.positionals.length > 0 ? slugify(parsed.positionals.join("-")) : undefined,
+		errors: parsed.errors,
 	};
 }
 
@@ -232,18 +344,21 @@ async function listPlans(frameRoot: string): Promise<PlanCandidate[]> {
 	} catch {
 		return [];
 	}
-	const plans: PlanCandidate[] = [];
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const path = join(frameRoot, entry.name);
-		try {
-			const todoStat = await stat(join(path, "TODO.md"));
-			plans.push({ slug: entry.name, path, mtimeMs: todoStat.mtimeMs });
-		} catch {
-			// Not a framed plan directory.
-		}
-	}
-	return plans.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	const plans = (
+		await mapConcurrent(
+			entries.filter((entry) => entry.isDirectory()),
+			async (entry): Promise<PlanCandidate | undefined> => {
+				const path = join(frameRoot, entry.name);
+				try {
+					const todoStat = await stat(join(path, "TODO.md"));
+					return { slug: entry.name, path, mtimeMs: todoStat.mtimeMs };
+				} catch {
+					return undefined;
+				}
+			},
+		)
+	).filter((plan): plan is PlanCandidate => plan !== undefined);
+	return plans.sort((a, b) => b.mtimeMs - a.mtimeMs || a.slug.localeCompare(b.slug));
 }
 
 async function buildRunKickoff(
@@ -251,11 +366,13 @@ async function buildRunKickoff(
 	args: FrameRunArgs,
 	cwd: string,
 	alternatives: string[],
+	launchPlan: string,
 ): Promise<string> {
 	const execution = await loadExecutionBody();
 	const scope: string[] = [];
 	if (args.phase) scope.push(`Run only phase ${args.phase} of the task graph, then stop for review.`);
 	if (args.from) scope.push(`Resume from task ${args.from}: run that task and its unfinished dependents only.`);
+	if (args.phase && args.from) scope.push("Phase and from scopes combine by intersection.");
 	if (scope.length === 0) scope.push("Run every unfinished task in dependency order.");
 	const label = relative(cwd, plan.path) || ".";
 
@@ -277,6 +394,15 @@ Execute the task graph in ${label}/TODO.md with pi-subagents. Do not re-run
 the task definitions in TODO.md — the only permitted plan edits are status and
 evidence updates in TODO.md.
 
+The extension has already parsed the scaffold and calculated this authoritative
+initial launch plan. Do not recalculate scope or topological layers yourself:
+
+${launchPlan}
+
+Re-read TODO.md before every launch layer. If its task definitions or statuses
+have changed unexpectedly since this plan was computed, stop and ask the
+operator to re-run /frame-run instead of guessing.
+
 Follow this workflow:
 
 --- BEGIN REFERENCE: execution.md ---
@@ -287,8 +413,9 @@ Supporting references (read with absolute paths when useful):
 - ${join(SKILL_DIR, "references", "todo-format.md")}
 - ${join(SKILL_DIR, "references", "agent-authoring.md")}
 
-Begin with preflight. If anything blocks execution (missing agents, unknown
-scope targets, an unreadable plan), stop and report instead of guessing.`;
+Begin with runtime agent discovery in preflight. Filesystem parsing, scope, and
+launch layers are already complete. If anything else blocks execution (missing
+agents or an unreadable plan), stop and report instead of guessing.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,12 +426,24 @@ export default function agentFrame(pi: ExtensionAPI) {
 	pi.registerCommand("frame", {
 		description: "Frame a goal into agent workers, AGENT.md files, and a shared TODO.md",
 		getArgumentCompletions: (prefix) => {
-			const flags = ["--out ", "--agents ", "--name "];
+			const flags = [
+				"--out ",
+				"--plan-dir ",
+				"--agents ",
+				"--agents-dir ",
+				"--name ",
+				"--slug ",
+				"--allow-outside-cwd",
+			];
 			const items = flags.filter((flag) => flag.startsWith(prefix)).map((flag) => ({ value: flag, label: flag }));
 			return items.length > 0 ? items : null;
 		},
 		handler: async (rawArgs, ctx) => {
 			const args = parseArgs(rawArgs);
+			if (args.errors.length > 0) {
+				ctx.ui.notify(`Invalid /frame arguments: ${args.errors.join(" ")}`, "warning");
+				return;
+			}
 			let goal = args.goal;
 
 			if (!goal) {
@@ -338,12 +477,16 @@ export default function agentFrame(pi: ExtensionAPI) {
 	pi.registerCommand("frame-run", {
 		description: "Execute a framed task graph with pi-subagents: /frame-run [slug] [--phase N] [--from T<n>] [--dry-run]",
 		getArgumentCompletions: (prefix) => {
-			const flags = ["--phase ", "--from ", "--dry-run", "--plan "];
+			const flags = ["--phase ", "--from ", "--dry-run", "--plan ", "--plan-dir "];
 			const items = flags.filter((flag) => flag.startsWith(prefix)).map((flag) => ({ value: flag, label: flag }));
 			return items.length > 0 ? items : null;
 		},
 		handler: async (rawArgs, ctx) => {
 			const args = parseRunArgs(rawArgs);
+			if (args.errors.length > 0) {
+				ctx.ui.notify(`Invalid /frame-run arguments: ${args.errors.join(" ")}`, "warning");
+				return;
+			}
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("Agent is busy. Try /frame-run again once the current turn finishes.", "warning");
 				return;
@@ -381,7 +524,33 @@ export default function agentFrame(pi: ExtensionAPI) {
 			}
 
 			const alternatives = plans.filter((plan) => plan.path !== target.path).map((plan) => plan.slug);
-			const kickoff = await buildRunKickoff(target, args, ctx.cwd, alternatives);
+			let todo: string;
+			let roster: string;
+			try {
+				[todo, roster] = await Promise.all([
+					readFile(join(target.path, "TODO.md"), "utf8"),
+					readFile(join(target.path, "ROSTER.md"), "utf8"),
+					readFile(join(target.path, "GOAL.md"), "utf8"),
+				]);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Unable to read framed plan "${target.slug}": ${message}`, "warning");
+				return;
+			}
+			const executionPlan = buildExecutionPlan({ todo, roster, phase: args.phase, from: args.from });
+			if (executionPlan.errors.length > 0) {
+				ctx.ui.notify(`Cannot execute "${target.slug}": ${executionPlan.errors.join(" ")}`, "warning");
+				return;
+			}
+			if (executionPlan.warnings.length > 0) {
+				ctx.ui.notify(`Plan warnings for "${target.slug}": ${executionPlan.warnings.join(" ")}`, "warning");
+			}
+			if (executionPlan.tasks.length === 0) {
+				ctx.ui.notify(`All tasks in the selected scope of "${target.slug}" are already done.`, "info");
+				return;
+			}
+			const launchPlan = formatExecutionPlan(executionPlan);
+			const kickoff = await buildRunKickoff(target, args, ctx.cwd, alternatives, launchPlan);
 			pi.setSessionName(`Frame run: ${target.slug}`);
 			ctx.ui.notify(
 				args.dryRun
@@ -404,11 +573,11 @@ export default function agentFrame(pi: ExtensionAPI) {
 		],
 		parameters: FrameParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const cwd = ctx.cwd;
 			const slug = slugify(params.slug || params.title || params.goal);
 			const planDir = params.planDir ?? join(CONFIG_DIR_NAME, "frame", slug);
-			const agentsDir = params.agentsDir ?? join(CONFIG_DIR_NAME, "agents");
+			const agentsDir = params.agentsDir ?? join(CONFIG_DIR_NAME, "agents", slug);
 
 			const plan = {
 				goal: params.goal,
@@ -426,6 +595,8 @@ export default function agentFrame(pi: ExtensionAPI) {
 					slug,
 					title: params.title,
 					overwrite: params.overwrite ?? false,
+					allowOutsideCwd: params.allowOutsideCwd ?? false,
+					signal,
 				});
 
 				const planDirLabel = relative(cwd, resolve(cwd, planDir)) || ".";
@@ -473,9 +644,17 @@ export default function agentFrame(pi: ExtensionAPI) {
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				const cancelled = signal?.aborted || (error instanceof Error && error.name === "AbortError");
 				return {
-					content: [{ type: "text", text: `frame_scaffold failed: ${message}` }],
-					details: { ok: false, errors: [message], warnings: [], files: [] },
+					content: [
+						{
+							type: "text",
+							text: cancelled
+								? "frame_scaffold cancelled; temporary-file cleanup and rollback were attempted."
+								: `frame_scaffold failed: ${message}`,
+						},
+					],
+					details: { ok: false, errors: [cancelled ? "Cancelled by operator." : message], warnings: [], files: [] },
 				};
 			}
 		},

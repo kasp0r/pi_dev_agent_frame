@@ -33,7 +33,9 @@ completion is proven.
 ## Authoring rules
 
 1. **One owner per task.** The `owner` must be the name of a defined agent. If a
-   task seems to need two owners, split it.
+   task seems to need two owners, split it. Task ids use letters and digits with
+   single `.`, `_`, or `-` separators (`T1`, `T1.2`) so execution parsing stays
+   deterministic.
 2. **Acyclic dependencies.** `dependsOn` may only reference other task ids and
    must not form a cycle. The scaffold tool rejects cycles before writing.
 3. **Phases communicate sequencing.** Use `Recon → Design → Implement → Verify →
@@ -51,7 +53,9 @@ completion is proven.
 
 Use one of `todo`, `in-progress`, `blocked`, `review`, `done` in the progress
 log. A task is only `done` when its acceptance criteria are met and evidence is
-recorded. Agents should update this file as work lands.
+recorded. Agents should update this file as work lands. Keep the task checkbox
+and progress-log status in sync; `/frame-run` rejects conflicting completion
+signals instead of risking a repeated task.
 
 ## Why checkboxes
 

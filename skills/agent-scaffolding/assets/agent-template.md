@@ -4,6 +4,8 @@ description: <one-line capability description used for discovery>
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
+access: read-only
+acceptanceRole: read-only
 tools: read, grep, find, ls
 ---
 

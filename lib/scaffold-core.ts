@@ -15,18 +15,34 @@
  * access is additive: validation always happens before anything is written.
  */
 
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+	access,
+	link,
+	lstat,
+	mkdir,
+	readFile,
+	realpath,
+	rename,
+	rm,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { mapConcurrent, mapConcurrentSettled } from "./concurrency.ts";
 
 // ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
+
+export type AgentAccess = "read-only" | "writer";
 
 export interface AgentSpec {
 	name: string;
 	role?: string;
 	description: string;
 	responsibility?: string;
+	access?: AgentAccess;
 	tools?: string;
 	thinking?: string;
 	systemPrompt: string;
@@ -43,8 +59,8 @@ export interface TaskSpec {
 }
 
 export interface FramingSpec {
-	summary?: string;
-	successCriteria?: string[];
+	summary: string;
+	successCriteria: string[];
 	constraints?: string[];
 	nonGoals?: string[];
 	risks?: string[];
@@ -54,7 +70,7 @@ export interface FramingSpec {
 export interface FramedPlan {
 	goal: string;
 	title?: string;
-	framing?: FramingSpec;
+	framing: FramingSpec;
 	agents?: AgentSpec[];
 	tasks?: TaskSpec[];
 }
@@ -95,10 +111,13 @@ export interface ScaffoldOptions {
 	slug?: string;
 	title?: string;
 	createdAt?: string;
+	/** Permit output outside cwd. Both build and write validate this boundary. */
+	allowOutsideCwd?: boolean;
 }
 
 export interface WriteOptions extends ScaffoldOptions {
 	overwrite?: boolean;
+	signal?: AbortSignal;
 }
 
 interface RenderMeta {
@@ -127,11 +146,12 @@ export function slugify(input: unknown, maxLen = 48): string {
 }
 
 const KEBAB_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const TASK_ID_RE = /^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/;
 
 function cleanList(list: unknown): string[] {
 	if (!Array.isArray(list)) return [];
 	return list
-		.map((item) => String(item ?? "").trim())
+		.map((item) => inline(item))
 		.filter((item) => item.length > 0);
 }
 
@@ -154,6 +174,11 @@ function yamlScalar(value: string): string {
 	return JSON.stringify(text);
 }
 
+/** Render one line of arbitrary text inside a Markdown table cell. */
+function tableCell(value: unknown): string {
+	return inline(value).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
+
 function bulletList(value: unknown, fallback = "_None recorded._"): string {
 	const items = cleanList(value);
 	if (items.length === 0) return fallback;
@@ -164,6 +189,32 @@ function checkboxList(value: unknown, fallback = "_None recorded._"): string {
 	const items = cleanList(value);
 	if (items.length === 0) return fallback;
 	return items.map((item) => `- [ ] ${item}`).join("\n");
+}
+
+interface PlanIndex {
+	agents: AgentSpec[];
+	tasks: TaskSpec[];
+	tasksByOwner: Map<string, TaskSpec[]>;
+}
+
+/** Index a plan once instead of rescanning every task for every agent. */
+function indexPlan(plan: FramedPlan): PlanIndex {
+	const agents = Array.isArray(plan.agents) ? plan.agents : [];
+	const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+	const tasksByOwner = new Map<string, TaskSpec[]>();
+	for (const task of tasks) {
+		const owner = inline(task.owner);
+		const owned = tasksByOwner.get(owner);
+		if (owned) owned.push(task);
+		else tasksByOwner.set(owner, [task]);
+	}
+	return { agents, tasks, tasksByOwner };
+}
+
+function effectiveAccess(agent: AgentSpec): AgentAccess {
+	if (agent.access) return agent.access;
+	const tools = inline(agent.tools).split(",").map((tool) => tool.trim());
+	return tools.some((tool) => tool === "edit" || tool === "write") ? "writer" : "read-only";
 }
 
 /**
@@ -216,11 +267,15 @@ function findCycle(tasks: Array<{ id: string; dependsOn?: string[] }>): string[]
 export function validatePlan(plan: FramedPlan | null | undefined): ValidationResult {
 	const errors: string[] = [];
 	const warnings: string[] = [];
-	const source: FramedPlan = plan ?? {};
+	const source = (plan ?? {}) as FramedPlan;
 	const agents = Array.isArray(source.agents) ? source.agents : [];
 	const tasks = Array.isArray(source.tasks) ? source.tasks : [];
 
 	if (!inline(source.goal)) errors.push("`goal` is required.");
+	if (!inline(source.framing?.summary)) errors.push("`framing.summary` is required.");
+	if (cleanList(source.framing?.successCriteria).length === 0) {
+		errors.push("At least one `framing.successCriteria` entry is required.");
+	}
 	if (agents.length === 0) errors.push("At least one agent is required.");
 	if (tasks.length === 0) errors.push("At least one task is required.");
 
@@ -238,6 +293,15 @@ export function validatePlan(plan: FramedPlan | null | undefined): ValidationRes
 		names.add(name);
 		if (!inline(agent?.description)) errors.push(`Agent "${name}" needs a one-line \`description\`.`);
 		if (!inline(agent?.systemPrompt)) errors.push(`Agent "${name}" needs a \`systemPrompt\`.`);
+		if (agent?.access !== undefined && agent.access !== "read-only" && agent.access !== "writer") {
+			errors.push(`Agent "${name}" access must be "read-only" or "writer".`);
+		}
+		if (agent?.access === "read-only" && /(?:^|,)\s*(?:edit|write)\s*(?:,|$)/.test(inline(agent.tools))) {
+			errors.push(`Agent "${name}" is read-only but its tools include edit or write.`);
+		}
+		if (agent?.thinking && !/^(?:off|minimal|low|medium|high|xhigh|max)$/.test(inline(agent.thinking))) {
+			errors.push(`Agent "${name}" has unknown thinking level "${inline(agent.thinking)}".`);
+		}
 	}
 
 	const ids = new Set<string>();
@@ -250,6 +314,9 @@ export function validatePlan(plan: FramedPlan | null | undefined): ValidationRes
 		if (ids.has(id)) errors.push(`Duplicate task id "${id}".`);
 		ids.add(id);
 		if (!inline(task?.title)) errors.push(`Task "${id}" needs a \`title\`.`);
+		if (!TASK_ID_RE.test(id)) {
+			errors.push(`Task "${id}" must use letters, digits, and single dot, underscore, or hyphen separators.`);
+		}
 		const owner = inline(task?.owner);
 		if (!owner) errors.push(`Task "${id}" needs an \`owner\`.`);
 		else if (!names.has(owner)) errors.push(`Task "${id}" owner "${owner}" is not a defined agent.`);
@@ -267,8 +334,9 @@ export function validatePlan(plan: FramedPlan | null | undefined): ValidationRes
 	const cycle = findCycle(tasks.map((task) => ({ id: inline(task?.id), dependsOn: task?.dependsOn })));
 	if (cycle) errors.push(`Dependency cycle detected: ${cycle.join(" -> ")}.`);
 
+	const taskOwners = new Set(tasks.map((task) => inline(task.owner)));
 	for (const name of names) {
-		if (!tasks.some((task) => inline(task?.owner) === name)) {
+		if (!taskOwners.has(name)) {
 			warnings.push(`Agent "${name}" owns no tasks.`);
 		}
 	}
@@ -326,16 +394,15 @@ ${bulletList(framing.openQuestions)}
 }
 
 export function renderRosterMd(plan: FramedPlan, meta: RenderMeta): string {
-	const agents = Array.isArray(plan.agents) ? plan.agents : [];
-	const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+	const { agents, tasksByOwner } = indexPlan(plan);
 	const title = inline(plan.title) || inline(plan.goal) || "Untitled goal";
 
 	const rows = agents
 		.map((agent) => {
 			const name = inline(agent.name);
-			const owned = tasks.filter((task) => inline(task.owner) === name).map((task) => inline(task.id));
-			return `| \`${name}\` | ${inline(agent.role) || "—"} | ${inline(agent.description)} | ${
-				owned.length ? owned.map((id) => `\`${id}\``).join(", ") : "—"
+			const owned = tasksByOwner.get(name) ?? [];
+			return `| \`${tableCell(name)}\` | ${tableCell(agent.role) || "—"} | ${effectiveAccess(agent)} | ${tableCell(agent.description)} | ${
+				owned.length ? owned.map((task) => `\`${tableCell(task.id)}\``).join(", ") : "—"
 			} |`;
 		})
 		.join("\n");
@@ -343,7 +410,7 @@ export function renderRosterMd(plan: FramedPlan, meta: RenderMeta): string {
 	const details = agents
 		.map((agent) => {
 			const name = inline(agent.name);
-			const owned = tasks.filter((task) => inline(task.owner) === name);
+			const owned = tasksByOwner.get(name) ?? [];
 			const taskLines = owned.length
 				? owned.map((task) => `- \`${inline(task.id)}\` — ${inline(task.title)}`).join("\n")
 				: "- _No tasks assigned._";
@@ -353,7 +420,7 @@ ${inline(agent.description)}
 
 **Owns:** ${inline(agent.responsibility) || "See task graph."}
 
-**Tools:** \`${inline(agent.tools) || READ_ONLY_TOOLS}\`
+**Tools:** \`${inline(agent.tools) || (effectiveAccess(agent) === "writer" ? WRITER_TOOLS : READ_ONLY_TOOLS)}\`
 
 **Tasks**
 
@@ -371,9 +438,9 @@ through the task graph in [\`TODO.md\`](./TODO.md), never edited concurrently.
 
 ## At a glance
 
-| Agent | Role | Responsibility | Tasks |
-| --- | --- | --- | --- |
-${rows || "| — | — | — | — |"}
+| Agent | Role | Access | Responsibility | Tasks |
+| --- | --- | --- | --- | --- |
+${rows || "| — | — | — | — | — |"}
 
 ## Agent briefs
 
@@ -391,7 +458,7 @@ ${details || "_No agents defined._"}
 
 export function renderTodoMd(plan: FramedPlan, meta: RenderMeta): string {
 	const framing = plan.framing ?? {};
-	const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+	const { tasks } = indexPlan(plan);
 	const title = inline(plan.title) || inline(plan.goal) || "Untitled goal";
 
 	const phases = new Map<string, TaskSpec[]>();
@@ -443,7 +510,7 @@ ${sections || "_No tasks defined._"}
 
 | Task | Owner | Status | Evidence / link |
 | --- | --- | --- | --- |
-${tasks.map((task) => `| \`${inline(task.id)}\` | \`${inline(task.owner)}\` | todo | — |`).join("\n") || "| — | — | — | — |"}
+${tasks.map((task) => `| \`${tableCell(task.id)}\` | \`${tableCell(task.owner)}\` | todo | — |`).join("\n") || "| — | — | — | — |"}
 
 ## Working agreements
 
@@ -455,12 +522,10 @@ ${tasks.map((task) => `| \`${inline(task.id)}\` | \`${inline(task.owner)}\` | to
 `;
 }
 
-export function renderAgentMd(agent: AgentSpec, plan: FramedPlan, meta: RenderMeta): string {
+function renderAgentMdWithTasks(agent: AgentSpec, plan: FramedPlan, meta: RenderMeta, tasks: TaskSpec[]): string {
 	const name = inline(agent.name);
-	const tasks = (Array.isArray(plan.tasks) ? plan.tasks : []).filter((task) => inline(task.owner) === name);
-	const tools = inline(agent.tools) || (tasks.some((task) => /write|edit|implement|fix|build/i.test(String(task.title)))
-		? WRITER_TOOLS
-		: READ_ONLY_TOOLS);
+	const access = effectiveAccess(agent);
+	const tools = inline(agent.tools) || (access === "writer" ? WRITER_TOOLS : READ_ONLY_TOOLS);
 
 	const assignment = tasks.length
 		? tasks
@@ -480,9 +545,10 @@ export function renderAgentMd(agent: AgentSpec, plan: FramedPlan, meta: RenderMe
 		`systemPromptMode: replace`,
 		`inheritProjectContext: true`,
 		`inheritSkills: false`,
-		`tools: ${tools}`,
+		`acceptanceRole: ${access}`,
+		`tools: ${yamlScalar(tools)}`,
 	];
-	if (inline(agent.thinking)) lines.push(`thinking: ${inline(agent.thinking)}`);
+	if (inline(agent.thinking)) lines.push(`thinking: ${yamlScalar(inline(agent.thinking))}`);
 	lines.push("---", "");
 
 	const body = String(agent.systemPrompt ?? "").trim();
@@ -510,6 +576,11 @@ ${assignment}
 	return `${lines.join("\n")}${body}\n\n${header}`;
 }
 
+export function renderAgentMd(agent: AgentSpec, plan: FramedPlan, meta: RenderMeta): string {
+	const tasks = indexPlan(plan).tasksByOwner.get(inline(agent.name)) ?? [];
+	return renderAgentMdWithTasks(agent, plan, meta, tasks);
+}
+
 /**
  * Check whether a path exists.
  */
@@ -522,18 +593,77 @@ async function exists(path: string): Promise<boolean> {
 	}
 }
 
+function isPathInside(root: string, target: string): boolean {
+	const rel = relative(root, target);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+async function nearestRealPath(path: string): Promise<string> {
+	let current = path;
+	while (true) {
+		try {
+			return await realpath(current);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			const parent = dirname(current);
+			if (parent === current) throw error;
+			current = parent;
+		}
+	}
+}
+
+/** Resolve existing ancestors and reject links that redirect output outside cwd. */
+async function validateRealWritePaths(
+	built: BuildResult,
+	options: WriteOptions,
+): Promise<string[]> {
+	if (options.allowOutsideCwd) return [];
+	const cwd = resolve(options.cwd);
+	const realCwd = await realpath(cwd);
+	const roots = [...new Set(built.files.map((file) => dirname(file.path)))];
+	const errors = await mapConcurrent(roots, async (root) => {
+		const actual = await nearestRealPath(root);
+		return isPathInside(realCwd, actual)
+			? undefined
+			: `Output directory "${root}" resolves outside the project through a symbolic link.`;
+	});
+	return errors.filter((error): error is string => error !== undefined);
+}
+
+async function rejectSymbolicLinkTargets(files: ScaffoldFile[]): Promise<string[]> {
+	const errors = await mapConcurrent(files, async (file) => {
+		try {
+			const stats = await lstat(file.path);
+			return stats.isSymbolicLink() ? `Target "${file.display}" is a symbolic link; choose a regular file path.` : undefined;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+	});
+	return errors.filter((error): error is string => error !== undefined);
+}
+
 /**
  * Build the full set of files for a plan without touching disk.
  */
 export function buildScaffold(plan: FramedPlan, options: ScaffoldOptions): BuildResult {
 	const validation = validatePlan(plan);
-	const cwd = options.cwd;
+	const cwd = resolve(options.cwd);
 	const slug = slugify(options.slug || plan.title || plan.goal);
 	const planDir = resolve(cwd, options.planDir);
 	const agentsDir = resolve(cwd, options.agentsDir);
 	const createdAt = options.createdAt ?? new Date().toISOString().slice(0, 10);
 	const planDirLabel = relative(cwd, planDir) || ".";
 	const agentsDirLabel = relative(cwd, agentsDir) || ".";
+	const errors = [...validation.errors];
+	if (!options.allowOutsideCwd) {
+		if (!isPathInside(cwd, planDir)) errors.push("`planDir` must stay inside the project cwd.");
+		if (!isPathInside(cwd, agentsDir)) errors.push("`agentsDir` must stay inside the project cwd.");
+		if (errors.length > validation.errors.length) {
+			errors.push("Use allowOutsideCwd=true only when the operator explicitly approved external output paths.");
+		}
+	}
+	const index = indexPlan(plan);
 
 	const meta: RenderMeta = {
 		slug,
@@ -544,7 +674,7 @@ export function buildScaffold(plan: FramedPlan, options: ScaffoldOptions): Build
 	};
 
 	const files: ScaffoldFile[] = [];
-	if (validation.errors.length === 0) {
+	if (errors.length === 0) {
 		files.push({
 			path: join(planDir, "GOAL.md"),
 			display: `${planDirLabel}/GOAL.md`,
@@ -563,35 +693,63 @@ export function buildScaffold(plan: FramedPlan, options: ScaffoldOptions): Build
 			kind: "todo",
 			content: renderTodoMd(plan, meta),
 		});
-		for (const agent of plan.agents ?? []) {
+		for (const agent of index.agents) {
 			const name = inline(agent.name);
 			files.push({
 				path: join(agentsDir, name, "AGENT.md"),
 				display: `${agentsDirLabel}/${name}/AGENT.md`,
 				kind: "agent",
-				content: renderAgentMd(agent, plan, meta),
+				content: renderAgentMdWithTasks(agent, plan, meta, index.tasksByOwner.get(name) ?? []),
 			});
 		}
 	}
 
-	return { errors: validation.errors, warnings: validation.warnings, files };
+	return { errors, warnings: validation.warnings, files };
+}
+
+interface OriginalFile {
+	content: Buffer;
+	mode: number;
+}
+
+async function snapshotFile(file: ScaffoldFile, signal?: AbortSignal): Promise<OriginalFile | undefined> {
+	try {
+		const stats = await lstat(file.path);
+		if (!stats.isFile()) throw new Error(`Target "${file.display}" is not a regular file.`);
+		return { content: await readFile(file.path, { signal }), mode: stats.mode };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+async function removeTemporaryFiles(entries: Array<{ temporaryPath: string }>): Promise<void> {
+	await mapConcurrentSettled(entries, (entry) => rm(entry.temporaryPath, { force: true }));
 }
 
 /**
- * Validate, then write the scaffold. Nothing is written when validation fails
- * or when a target exists and `overwrite` is false.
+ * Validate, stage, then commit the scaffold. Validation and conflict failures
+ * write nothing; a failed commit restores every target changed by this call.
  */
 export async function writeScaffold(plan: FramedPlan, options: WriteOptions): Promise<WriteResult> {
+	options.signal?.throwIfAborted();
 	const built = buildScaffold(plan, options);
 	if (built.errors.length > 0) {
 		return { ok: false, errors: built.errors, warnings: built.warnings, files: [] };
 	}
 
+	const pathErrors = [
+		...(await validateRealWritePaths(built, options)),
+		...(await rejectSymbolicLinkTargets(built.files)),
+	];
+	if (pathErrors.length > 0) {
+		return { ok: false, errors: pathErrors, warnings: built.warnings, files: [] };
+	}
+
 	if (!options.overwrite) {
-		const conflicts: string[] = [];
-		for (const file of built.files) {
-			if (await exists(file.path)) conflicts.push(file.display);
-		}
+		const conflicts = (
+			await mapConcurrent(built.files, async (file) => ((await exists(file.path)) ? file.display : undefined))
+		).filter((display): display is string => display !== undefined);
 		if (conflicts.length > 0) {
 			return {
 				ok: false,
@@ -604,10 +762,67 @@ export async function writeScaffold(plan: FramedPlan, options: WriteOptions): Pr
 		}
 	}
 
-	for (const file of built.files) {
-		await mkdir(dirname(file.path), { recursive: true });
-		await writeFile(file.path, file.content, "utf8");
+	options.signal?.throwIfAborted();
+	const directories = [...new Set(built.files.map((file) => dirname(file.path)))];
+	await mapConcurrent(directories, (directory) => mkdir(directory, { recursive: true }));
+	options.signal?.throwIfAborted();
+
+	const originals = new Map<string, OriginalFile | undefined>();
+	if (options.overwrite) {
+		await mapConcurrent(built.files, async (file) => originals.set(file.path, await snapshotFile(file, options.signal)));
 	}
+
+	const entries = built.files.map((file) => ({
+		file,
+		temporaryPath: join(dirname(file.path), `.${basename(file.path)}.agent-frame-${process.pid}-${randomUUID()}.tmp`),
+	}));
+	const staged = await mapConcurrentSettled(entries, (entry) =>
+		writeFile(entry.temporaryPath, entry.file.content, {
+			encoding: "utf8",
+			flag: "wx",
+			mode: originals.get(entry.file.path)?.mode,
+			signal: options.signal,
+		}),
+	);
+	const stagingFailure = staged.find((result): result is PromiseRejectedResult => result.status === "rejected");
+	if (stagingFailure) {
+		await removeTemporaryFiles(entries);
+		throw stagingFailure.reason;
+	}
+
+	const committed: typeof entries = [];
+	try {
+		for (const entry of entries) {
+			options.signal?.throwIfAborted();
+			if (options.overwrite) {
+				await rename(entry.temporaryPath, entry.file.path);
+			} else {
+				// A same-directory hard link atomically refuses a target created after
+				// preflight, unlike rename(), which would replace it on POSIX.
+				await link(entry.temporaryPath, entry.file.path);
+				committed.push(entry);
+				await unlink(entry.temporaryPath);
+			}
+			if (options.overwrite) committed.push(entry);
+		}
+	} catch (error) {
+		const rollbackErrors: unknown[] = [];
+		for (const entry of committed.reverse()) {
+			const original = originals.get(entry.file.path);
+			try {
+				if (original) await writeFile(entry.file.path, original.content, { mode: original.mode });
+				else await rm(entry.file.path, { force: true });
+			} catch (rollbackError) {
+				rollbackErrors.push(rollbackError);
+			}
+		}
+		await removeTemporaryFiles(entries);
+		if (rollbackErrors.length > 0) {
+			throw new AggregateError([error, ...rollbackErrors], "Scaffold commit failed and rollback was incomplete.");
+		}
+		throw error;
+	}
+	await removeTemporaryFiles(entries);
 
 	return {
 		ok: true,
