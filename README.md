@@ -309,6 +309,8 @@ lib/scaffold-core.ts         # indexed renderers, validation, staged writer
 lib/execution-core.ts        # TODO parser, scope selection, launch planner
 lib/concurrency.ts           # bounded independent-async operations
 skills/agent-scaffolding/    # framing and execution methodology
+scripts/pi-rpc-client.mjs    # bounded JSONL RPC client for programmatic tests
+scripts/live-acceptance.mjs  # opt-in real-model acceptance workflow
 test/                        # unit, smoke, and packed-runtime integration tests
 ```
 
@@ -316,6 +318,31 @@ Tests load TypeScript through jiti, matching pi's runtime loader. The packaging
 test installs the tarball, parses and discovers a generated agent with real
 YAML/pi-subagents code, and loads the packed extension through Pi RPC without
 making model calls.
+
+### Live acceptance (real model calls)
+
+```bash
+# Frame, validate discovery, reject an invalid phase, and verify dry-run.
+# Makes provider calls, but never launches task agents.
+npm run test:acceptance
+
+# Additionally execute phase 1, stop at its boundary, resume phase 2, verify
+# exact artifacts/evidence, rerun idempotently, and frame a second plan.
+npm run test:acceptance -- --execute
+```
+
+The harness packs and installs the package, starts Pi RPC in a temporary project,
+and uses the configured provider credentials. Use `--model <id>` or
+`PI_AGENT_FRAME_ACCEPTANCE_MODEL` to select a model. Ambient extensions are
+disabled for reproducibility; load a custom provider explicitly with repeatable
+`--extension <path>` flags. Every live stage has a
+timeout (`PI_AGENT_FRAME_ACCEPTANCE_TIMEOUT_MS`, default 240000 ms). Failures
+preserve RPC transcripts and diagnostics, abort the parent, and stop active
+children. Use `--keep` to retain artifacts after success.
+
+Live acceptance is intentionally excluded from normal tests and CI because it
+can incur provider charges and model behavior can vary. The offline RPC client
+and harness assertions are covered by ordinary unit tests.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution rules and
 [CHANGELOG.md](./CHANGELOG.md) for notable changes.

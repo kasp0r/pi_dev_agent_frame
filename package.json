@@ -27,7 +27,8 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:unit": "node --test test/concurrency.test.mjs test/scaffold-core.test.mjs test/execution-core.test.mjs test/extension-smoke.test.mjs",
+    "test:unit": "node --test test/concurrency.test.mjs test/scaffold-core.test.mjs test/execution-core.test.mjs test/extension-smoke.test.mjs test/live-acceptance.test.mjs test/write-transaction.test.mjs",
+    "test:acceptance": "node scripts/live-acceptance.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "check:examples": "node examples/generate.mjs && git diff --exit-code -- examples/items-api",
     "check": "npm run typecheck && npm test && npm pack --dry-run"

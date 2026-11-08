@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["extensions/**/*.ts", "lib/**/*.ts"]
+  "include": ["extensions/**/*.ts", "lib/**/*.ts", "test/fixtures/**/*.ts"]
 }

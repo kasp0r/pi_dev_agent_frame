@@ -42,7 +42,10 @@ examples/                   # committed sample output (node examples/generate.mj
   `test/execution-core.test.mjs`; command/tool changes go in
   `test/extension-smoke.test.mjs`. `test/package-integration.test.mjs` packs and
   installs the artifact, exercises real YAML/pi-subagents discovery, and loads it
-  through Pi RPC without model calls.
+  through Pi RPC without model calls. Offline tests for the live harness use
+  `test/fixtures/fake-pi-rpc.mjs`; the real-model workflow is opt-in through
+  `npm run test:acceptance` (`--execute` launches agents) and is never required
+  for ordinary CI.
 - **Regenerate the example.** If you change a renderer, run
   `node examples/generate.mjs` and commit the refreshed `examples/items-api/`.
 - **Keep flag docs in sync.** `parseArgs` / `parseRunArgs`, the command
@@ -53,6 +56,10 @@ examples/                   # committed sample output (node examples/generate.mj
 - **Argument robustness:** Ensure any changes to `parseArgs` or `parseRunArgs`
   handle edge cases like quoted strings, extra whitespace, or unexpected flags
   without crashing.
+- **Live test safety:** Keep real-model acceptance out of `npm test` and CI.
+  Confine project edits to a temporary directory, bound every stage, preserve
+  failure diagnostics, and stop active children on failure. `--help` and argument
+  failures must never start Pi or invoke a provider.
 - **Path security:** `planDir` and `agentsDir` must remain inside the resolved
   project cwd, including existing symlink ancestors. External output requires
   explicit operator approval via `allowOutsideCwd`; never weaken this silently.

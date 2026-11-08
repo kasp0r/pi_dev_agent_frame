@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strict TypeScript checking, pinned development dependencies and lockfile,
   Node 22/24 CI, and a packed-package integration test covering YAML parsing,
   real pi-subagents discovery, and extension loading through Pi RPC.
+- Opt-in `npm run test:acceptance` live harness with real framing/dry-run,
+  optional execution and phase-boundary resume, artifact assertions, bounded
+  timeouts, child cleanup, and preserved failure diagnostics. Offline fake-RPC
+  tests cover the client without provider calls.
 
 ### Changed
 
