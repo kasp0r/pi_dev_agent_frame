@@ -1,6 +1,6 @@
 {
   "name": "pi-agent-frame",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Frame a goal into a subagent roster, generated AGENT.md files, and a shared TODO.md for agentic execution.",
   "type": "module",
   "license": "MIT",
